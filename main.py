@@ -2,7 +2,6 @@
 
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import webbrowser
-import asyncio
 import urllib.parse as urlparse
 from urllib.parse import urlencode
 import requests
@@ -10,9 +9,13 @@ from base64 import  urlsafe_b64encode
 import secrets
 from hashlib import sha256
 
-from spotipy import SpotifyPKCE
+from concurrent.futures import ThreadPoolExecutor
+import os
+from time import time
 
+import traceback
 import json
+from json.decoder import JSONDecodeError
 from pygments import highlight
 from pygments.lexers import JsonLexer
 from pygments.formatters import TerminalFormatter
@@ -34,6 +37,10 @@ playlist_id:str
 host_name = 'localhost'
 server_port = 8080
 
+project_name = 'spotify-playlist-manager'
+cache_dir = os.path.expanduser(f"~/.cache/{project_name}")
+tokens_filepath = os.path.join(cache_dir, 'tokens.json')
+
 
 closer_webpage = \
 """
@@ -43,6 +50,7 @@ closer_webpage = \
         <title>You may close this window.</title>
     </head>
     <body>
+        <h1>You may close this window.</h1>
         <script>close()</script>
     </body>
 </html>
@@ -63,59 +71,94 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-async def one_time_serve():
-    server = HTTPServer((host_name, server_port), HTTPRequestHandler)
-
-    try:
-        server.handle_request()
-    except KeyboardInterrupt:
-        server.server_close()
-
-def webbrowse(url):
-    wb = webbrowser.get(using="firefox")
-    wb.open(url, new=2)
-#     webbrowser.open(url, new=2)
-
 def dump_as_json(str):
     json_obj = json.loads(str)
     json_str = json.dumps(json_obj, indent=4, sort_keys=True)
     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
+def dump_json(json_obj):
+    json_str = json.dumps(json_obj, indent=4, sort_keys=True)
+    print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
-async def main():
+def request_code():
     code_verifier = secrets.token_urlsafe(43 + secrets.randbits(7) % 86)
     code_challenge = urlsafe_b64encode(sha256(code_verifier.encode('ascii')).digest()).decode('ascii').replace('=','')
 
-    print(code_verifier)
-    print(code_challenge)
+    webbrowser.open( OAuth_url + '?' \
+                   + urlencode({ 'response_type'         : 'code'         \
+                               , 'client_id'             : client_id      \
+                               , 'scope'                 : scope          \
+                               , 'redirect_uri'          : redirect_uri   \
+                               , 'state'                 : state          \
+                               , 'code_challenge'        : code_challenge \
+                               , 'code_challenge_method' : 'S256'         })
+                   , new=2 )
+    return code, code_verifier
 
-    spotify_authorizer = SpotifyPKCE( username = 'Martin'         \
-                                    , client_id    = client_id    \
-                                    , redirect_uri = redirect_uri \
-                                    , state        = state        )
-    server = one_time_serve()
-    webbrowse( OAuth_url + '?' \
-             + urlencode({ 'response_type'         : 'code'         \
-                         , 'client_id'             : client_id      \
-                         , 'scope'                 : scope          \
-                         , 'redirect_uri'          : redirect_uri   \
-                         , 'state'                 : state          \
-                         , 'code_challenge'        : code_challenge \
-                         , 'code_challenge_method' : 'S256'       }))
-    await server
+def request_tokens():
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(request_code)
 
+        server = HTTPServer((host_name, server_port), HTTPRequestHandler)
+        try:
+            server.handle_request()
+        except KeyboardInterrupt:
+            server.server_close()
 
+        code, code_verifier = future.result()
+
+        response = requests.post( token_url \
+                                , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
+                                , data=urlencode({ 'client_id'     : client_id            \
+                                                 , 'grant_type'    : 'authorization_code' \
+                                                 , 'code'          : code                 \
+                                                 , 'redirect_uri'  : redirect_uri         \
+                                                 , 'code_verifier' : code_verifier        }).encode('ascii') )
+        return response.json()
+
+def get_new_access_token(refresh_token):
     response = requests.post( token_url \
                             , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
-                             , data=urlencode({ 'client_id'     : client_id            \
-                                              , 'grant_type'    : 'authorization_code' \
-                                              , 'code'          : code                 \
-                                              , 'redirect_uri'  : redirect_uri         \
-                                              , 'code_verifier' : code_verifier        }).encode('ascii') )
-    dump_as_json(response.text)
-    response = response.json()
-    access_token = response['access_token']
-    refresh_token = response['refresh_token']
+                            , data=urlencode({ 'grant_type'    : 'authorization_code' \
+                                             , 'refresh_token' : refresh_token        \
+                                             , 'client_id'     : client_id            }).encode('ascii') )
+    return response.json()['access_token']
+
+def get_access_token():
+    # check cache for valid access token
+    try:
+        with open(tokens_filepath, 'r') as tokens_file:
+            try:
+                tokens = json.load(tokens_file)
+                if tokens is not dict: raise TypeError
+                print(tokens)
+                if time() - os.path.getmtime(tokens_filepath) > tokens['expires_in']:
+                    tokens = get_new_access_token(tokens['refresh_token'])
+                    with open(tokens_filepath, 'w') as tokens_file:
+                        tokens = request_tokens()
+                        json.dump(tokens, tokens_file)
+                    return tokens['access_token']
+                else: return tokens['access_token']
+            except ( JSONDecodeError \
+                   , KeyError        \
+                   , TypeError       ):
+                os.remove(tokens_filepath)
+                return get_access_token()
+    except FileNotFoundError:
+        try:
+            with open(tokens_filepath, 'w') as tokens_file:
+                tokens = request_tokens()
+                dump_json(tokens)
+                json.dump(tokens, tokens_file)
+                return tokens['access_token']
+        except FileNotFoundError:
+            os.makedirs(cache_dir)
+            return get_access_token()
+    except:
+        traceback.print_exc()
+
+def main():
+    access_token = get_access_token()
 
 #   GET https://api.spotify.com/v1/me
     response = requests.get( 'http://api.spotify.com/v1/me'                        \
@@ -155,8 +198,5 @@ async def main():
         print(f"[{track['album']['name']}]", end=' ')
         print(track['name'])
 
-
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
-    loop.close()
+    main()
