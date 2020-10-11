@@ -6,7 +6,11 @@ import asyncio
 import urllib.parse as urlparse
 from urllib.parse import urlencode
 import requests
-from base64 import b64encode
+from base64 import  urlsafe_b64encode
+import secrets
+from hashlib import sha256
+
+from spotipy import SpotifyPKCE
 
 import json
 from pygments import highlight
@@ -14,14 +18,11 @@ from pygments.lexers import JsonLexer
 from pygments.formatters import TerminalFormatter
 
 client_id = 'ccf29f57a6f049a08d83403ff98ce91b';
-client_secret = 'f54a9f2396ac4407b14120e77d63b50d';
 redirect_uri = 'http://localhost:8080';
 
 OAuth_url = 'https://accounts.spotify.com/authorize'
 token_url = 'https://accounts.spotify.com/api/token'
-response_type = 'code'
-scope = 'user-read-private user-read-email'
-grant_type = 'authorization_code'
+scope = 'user-read-private'
 state = '0123456789ABCDE'
 code: str
 access_token: str
@@ -82,23 +83,35 @@ def dump_as_json(str):
 
 
 async def main():
+    code_verifier = secrets.token_urlsafe(43 + secrets.randbits(7) % 86)
+    code_challenge = urlsafe_b64encode(sha256(code_verifier.encode('ascii')).digest()).decode('ascii').replace('=','')
+
+    print(code_verifier)
+    print(code_challenge)
+
+    spotify_authorizer = SpotifyPKCE( username = 'Martin'         \
+                                    , client_id    = client_id    \
+                                    , redirect_uri = redirect_uri \
+                                    , state        = state        )
     server = one_time_serve()
     webbrowse( OAuth_url + '?' \
-             + urlencode({ 'response_type' : response_type \
-                         , 'client_id'     : client_id     \
-                         , 'scope'         : scope         \
-                         , 'redirect_uri'  : redirect_uri  \
-                         , 'state'         : state         }))
+             + urlencode({ 'response_type'         : 'code'         \
+                         , 'client_id'             : client_id      \
+                         , 'scope'                 : scope          \
+                         , 'redirect_uri'          : redirect_uri   \
+                         , 'state'                 : state          \
+                         , 'code_challenge'        : code_challenge \
+                         , 'code_challenge_method' : 'S256'       }))
     await server
 
-    auth = b64encode(str(f'{client_id}:{client_secret}').encode('ascii') \
-                    ).decode('ascii')
-    response = requests.post( token_url                                                         \
-                            , headers={ 'content-type' : 'application/x-www-form-urlencoded'    \
-                                      , 'Authorization' : f'Basic {auth}' }                     \
-                            , data=urlencode({ 'code'         : code                            \
-                                             , 'redirect_uri' : redirect_uri                    \
-                                             , 'grant_type'   : grant_type   }).encode('ascii') )
+
+    response = requests.post( token_url \
+                            , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
+                             , data=urlencode({ 'client_id'     : client_id            \
+                                              , 'grant_type'    : 'authorization_code' \
+                                              , 'code'          : code                 \
+                                              , 'redirect_uri'  : redirect_uri         \
+                                              , 'code_verifier' : code_verifier        }).encode('ascii') )
     dump_as_json(response.text)
     response = response.json()
     access_token = response['access_token']
