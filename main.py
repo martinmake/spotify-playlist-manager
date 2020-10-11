@@ -9,7 +9,7 @@ from base64 import  urlsafe_b64encode
 import secrets
 from hashlib import sha256
 
-from concurrent.futures import ThreadPoolExecutor
+from threading import Thread
 import os
 from time import time
 
@@ -57,6 +57,7 @@ closer_webpage = \
 """
 
 class HTTPRequestHandler(BaseHTTPRequestHandler):
+
     def do_GET(self):
         url = urlparse.urlparse(self.path)
         qs = urlparse.parse_qs(url.query)
@@ -68,6 +69,7 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(bytes(closer_webpage, "utf-8"))
+
     def log_message(self, format, *args):
         return
 
@@ -80,9 +82,20 @@ def dump_json(json_obj):
     json_str = json.dumps(json_obj, indent=4, sort_keys=True)
     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
-def request_code():
-    code_verifier = secrets.token_urlsafe(43 + secrets.randbits(7) % 86)
+def serve_closer():
+    server = HTTPServer((host_name, server_port), HTTPRequestHandler)
+
+    try:
+        server.handle_request()
+    except KeyboardInterrupt:
+        server.server_close()
+
+
+def request_code(code_verifier ):
     code_challenge = urlsafe_b64encode(sha256(code_verifier.encode('ascii')).digest()).decode('ascii').replace('=','')
+
+    t = Thread(target=serve_closer)
+    t.start()
 
     webbrowser.open( OAuth_url + '?' \
                    + urlencode({ 'response_type'         : 'code'         \
@@ -93,28 +106,22 @@ def request_code():
                                , 'code_challenge'        : code_challenge \
                                , 'code_challenge_method' : 'S256'         })
                    , new=2 )
-    return code, code_verifier
+    t.join()
+
+    return code
 
 def request_tokens():
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(request_code)
+    code_verifier = secrets.token_urlsafe(43 + secrets.randbits(7) % 86)
+    code = request_code(code_verifier )
 
-        server = HTTPServer((host_name, server_port), HTTPRequestHandler)
-        try:
-            server.handle_request()
-        except KeyboardInterrupt:
-            server.server_close()
-
-        code, code_verifier = future.result()
-
-        response = requests.post( token_url \
-                                , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
-                                , data=urlencode({ 'client_id'     : client_id            \
-                                                 , 'grant_type'    : 'authorization_code' \
-                                                 , 'code'          : code                 \
-                                                 , 'redirect_uri'  : redirect_uri         \
-                                                 , 'code_verifier' : code_verifier        }).encode('ascii') )
-        return response.json()
+    response = requests.post( token_url \
+                            , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
+                            , data=urlencode({ 'client_id'     : client_id            \
+                                             , 'grant_type'    : 'authorization_code' \
+                                             , 'code'          : code                 \
+                                             , 'redirect_uri'  : redirect_uri         \
+                                             , 'code_verifier' : code_verifier        }).encode('ascii') )
+    return response.json()
 
 def get_new_access_token(refresh_token):
     response = requests.post( token_url \
