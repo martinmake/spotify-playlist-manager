@@ -11,7 +11,12 @@ from hashlib import sha256
 
 from threading import Thread
 import os
+from os import path, getcwd
 from time import time
+import sys
+import argparse
+from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+from getpass import getuser
 
 import traceback
 import json
@@ -20,28 +25,25 @@ from pygments import highlight
 from pygments.lexers import JsonLexer
 from pygments.formatters import TerminalFormatter
 
+epilog='''<https://www.github.com/martinmake/spotify-playlist-manager>'''
+
 client_id = 'ccf29f57a6f049a08d83403ff98ce91b';
 redirect_uri = 'http://localhost:8080';
 
-OAuth_url = 'https://accounts.spotify.com/authorize'
-token_url = 'https://accounts.spotify.com/api/token'
 scope = 'user-read-private'
 state = '0123456789ABCDE'
 maximum_track_count_in_block = 100
 code: str
-access_token: str
-refresh_token: str
-user_id: str
-playlist_name: str = '\u0420\u0415\u0419\u0412' # RAVE # Shouldn't be hard coded!
-playlist_id:str
 
 host_name = 'localhost'
 server_port = 8080
 
+tracks_filepath_default='./tracks.tsv'
+value_separator_default='\t'
+value_separator=value_separator_default
 project_name = 'spotify-playlist-manager'
 cache_dir = os.path.expanduser(f"~/.cache/{project_name}")
 tokens_filepath = os.path.join(cache_dir, 'tokens.json')
-value_separator='\t'
 
 
 closer_webpage = \
@@ -78,11 +80,11 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 def dump_as_json(str):
     json_obj = json.loads(str)
     json_str = json.dumps(json_obj, indent=4, sort_keys=True)
-#     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
+    print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
 def dump_json(json_obj):
     json_str = json.dumps(json_obj, indent=4, sort_keys=True)
-#     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
+    print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
 def serve_closer():
     server = HTTPServer((host_name, server_port), HTTPRequestHandler)
@@ -99,13 +101,13 @@ def request_code(code_verifier ):
     t = Thread(target=serve_closer)
     t.start()
 
-    webbrowser.open( OAuth_url + '?' \
-                   + urlencode({ 'response_type'         : 'code'         \
-                               , 'client_id'             : client_id      \
-                               , 'scope'                 : scope          \
-                               , 'redirect_uri'          : redirect_uri   \
-                               , 'state'                 : state          \
-                               , 'code_challenge'        : code_challenge \
+    webbrowser.open( 'https://accounts.spotify.com/authorize' + '?'
+                   + urlencode({ 'response_type'         : 'code'
+                               , 'client_id'             : client_id
+                               , 'scope'                 : scope
+                               , 'redirect_uri'          : redirect_uri
+                               , 'state'                 : state
+                               , 'code_challenge'        : code_challenge
                                , 'code_challenge_method' : 'S256'         })
                    , new=2 )
     t.join()
@@ -116,22 +118,24 @@ def request_tokens():
     code_verifier = secrets.token_urlsafe(43 + secrets.randbits(7) % 86)
     code = request_code(code_verifier )
 
-    response = requests.post( token_url \
-                            , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
-                            , data=urlencode({ 'client_id'     : client_id            \
-                                             , 'grant_type'    : 'authorization_code' \
-                                             , 'code'          : code                 \
-                                             , 'redirect_uri'  : redirect_uri         \
-                                             , 'code_verifier' : code_verifier        }).encode('ascii') )
+    response = requests.post( 'https://accounts.spotify.com/api/token'
+                            , headers={ 'content-type' : 'application/x-www-form-urlencoded' }
+                            , data=urlencode({ 'client_id'     : client_id
+                                             , 'grant_type'    : 'authorization_code'
+                                             , 'code'          : code
+                                             , 'redirect_uri'  : redirect_uri
+                                             , 'code_verifier' : code_verifier
+                                             }).encode('ascii') )
     return response.json()
 
-def get_new_access_token(refresh_token):
-    response = requests.post( token_url \
-                            , headers={ 'content-type' : 'application/x-www-form-urlencoded' } \
-                            , data=urlencode({ 'grant_type'    : 'authorization_code' \
-                                             , 'refresh_token' : refresh_token        \
-                                             , 'client_id'     : client_id            }).encode('ascii') )
-    return response.json()['access_token']
+def refresh_tokens(refresh_token):
+    response = requests.post( 'https://accounts.spotify.com/api/token'
+                            , headers={ 'content-type' : 'application/x-www-form-urlencoded' }
+                            , data=urlencode({ 'grant_type'    : 'refresh_token'
+                                             , 'refresh_token' : refresh_token
+                                             , 'client_id'     : client_id
+                                             }).encode('ascii') )
+    return response.json()
 
 def get_access_token():
     # check cache for valid access token
@@ -140,24 +144,23 @@ def get_access_token():
             try:
                 tokens = json.load(tokens_file)
                 if tokens is None: raise TypeError
-                if time() - os.path.getmtime(tokens_filepath) > tokens['expires_in']:
-                    tokens = get_new_access_token(tokens['refresh_token'])
-                    with open(tokens_filepath, 'w') as tokens_file:
-                        tokens = request_tokens()
-                        json.dump(tokens, tokens_file)
-                    return tokens['access_token']
-                else: return tokens['access_token']
-            except ( JSONDecodeError \
-                   , KeyError        \
-                   , TypeError       ):
-                traceback.print_exc()
+            except ( JSONDecodeError
+                   , TypeError ):
                 os.remove(tokens_filepath)
                 return get_access_token()
+        try:
+            if time() - os.path.getmtime(tokens_filepath) > tokens['expires_in']:
+                tokens = refresh_tokens(tokens['refresh_token'])
+                with open(tokens_filepath, 'w') as tokens_file:
+                    json.dump(tokens, tokens_file)
+            return tokens['access_token']
+        except KeyError:
+            os.remove(tokens_filepath)
+            return get_access_token()
     except FileNotFoundError:
         try:
             with open(tokens_filepath, 'w') as tokens_file:
                 tokens = request_tokens()
-                dump_json(tokens)
                 json.dump(tokens, tokens_file)
                 return tokens['access_token']
         except FileNotFoundError:
@@ -166,34 +169,41 @@ def get_access_token():
     except:
         traceback.print_exc()
 
-def main():
+def push(args):
+    playlist_name = args.playlist_name
+    global server_port # retarded
+    server_port = args.port
+
+def pull(args):
+    playlist_name = args.playlist_name
+
     access_token = get_access_token()
 
-#   GET https://api.spotify.com/v1/me
-    response = requests.get( 'http://api.spotify.com/v1/me'                        \
-                           , headers={ 'Authorization': f'Bearer {access_token}' } )
-    dump_as_json(response.text)
-    response = response.json()
-    user_id = response['id']
+    if not 'playlist_id' in args:
+#       GET https://api.spotify.com/v1/me
+        response = requests.get( 'https://api.spotify.com/v1/me'
+                               , headers={ 'Authorization': f"Bearer {access_token}" } )
+        user_id = response.json()['id']
 
-#   GET https://api.spotify.com/v1/users/{user_id}/playlists
-    response = requests.get( f'https://api.spotify.com/v1/users/{user_id}/playlists' \
-                           , headers={ 'Authorization': f'Bearer {access_token}' }   )
-    dump_as_json(response.text)
-    playlists = response.json()['items']
-    for playlist in playlists:
-        if playlist['name'] == playlist_name:
-            global playlist_id
-            playlist_id = playlist['id']
+#       GET https://api.spotify.com/v1/users/{user_id}/playlists
+        response = requests.get( f"https://api.spotify.com/v1/users/{user_id}/playlists"
+                               , headers={ 'Authorization': f"Bearer {access_token}" } )
+        playlists = response.json()['items']
+        playlist_id = None
+        for playlist in playlists:
+            if playlist['name'] == playlist_name:
+                playlist_id = playlist['id']
+        if not playlist_id:
+            print(f"ERROR: Playlist '{playlist_name}' not found!")
+            exit(2)
+
 
 #   GET https://api.spotify.com/v1/playlists/{playlist_id}
-    response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}' \
-                           , headers={ 'Authorization': f'Bearer {access_token}' } \
-                           , params={ 'fields' : 'tracks.total' }               )
-    dump_as_json(response.text)
+    response = requests.get( f"https://api.spotify.com/v1/playlists/{playlist_id}"
+                           , headers={ 'Authorization': f"Bearer {access_token}" }
+                           , params={ 'fields' : 'tracks.total' } )
     track_count = response.json()['tracks']['total']
 
-#   GET https://api.spotify.com/v1/playlists/{playlist_id}/tracks
     remaining_track_count = track_count
     print(f"id{value_separator}artists{value_separator}album{value_separator}name")
     while remaining_track_count > 0:
@@ -202,13 +212,12 @@ def main():
             track_count_in_current_block = maximum_track_count_in_block
         else:
             track_count_in_current_block = remaining_track_count
-
-        response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'    \
-                               , headers={ 'Authorization': f'Bearer {access_token}' }           \
-                               , params={ 'fields' : 'items.track(id,name,artists(id,name),album(id,name))' \
-                                        , 'offset' : track_count - remaining_track_count                    \
-                                        , 'limit'  : track_count_in_current_block                           })
-        dump_as_json(response.text)
+#       GET https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+        response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'
+                               , headers={ 'Authorization': f"Bearer {access_token}" }
+                               , params={ 'fields' : 'items.track(id,name,artists(name),album(name))'
+                                        , 'offset' : track_count - remaining_track_count
+                                        , 'limit'  : track_count_in_current_block } )
         for track in (item['track'] for item in response.json()['items']):
             print(track['id'], end=value_separator)
             print(track['artists'][0]['name'], end='')
@@ -219,5 +228,76 @@ def main():
             print(track['name'])
         remaining_track_count -= track_count_in_current_block
 
+def main(argv):
+    parser = ArgumentParser( prog=argv[0]
+                           , description='''      Push/pull spotify playlist
+                                            from text file to cloud and vice versa.'''
+                           , epilog=epilog
+                           , formatter_class=ArgumentDefaultsHelpFormatter
+                           , allow_abbrev=False )
+    subparsers = parser.add_subparsers( dest='command'
+                                      , required=True
+                                      , title='commands'
+                                      , description='Select from different commands.'
+                                      , help='Idkkkkk.' )
+
+    pull_parser = subparsers.add_parser( 'pull'
+                                       , help='Pull spotify playlist from the cloud into a file.'
+                                       , description='Pull spotify playlist from the cloud into a file.'
+                                       , epilog=epilog
+                                       , formatter_class=ArgumentDefaultsHelpFormatter
+                                       , allow_abbrev=False )
+    pull_parser.set_defaults(command=pull)
+    pull_parser.add_argument( '-u'
+                            , '--username'
+                            , type=str
+                            , default=getuser()
+                            , help='username of current client' )
+    pull_parser.add_argument( '-p', '--playlist-name'
+                            , type=str
+                            , default=path.basename(getcwd())
+                            , help='name of your spotify playlist' )
+    pull_parser.add_argument( '--port'
+                            , type=int
+                            , default=8080
+                            , choices=[8080, 8888, 123456, 666]
+                            , help='local port for authentication' )
+
+    push_parser = subparsers.add_parser( 'push'
+                                       , help='Push spotify playlist from a file into the cloud.'
+                                       , description='Push spotify playlist from a file into the cloud.'
+                                       , epilog=epilog
+                                       , formatter_class=ArgumentDefaultsHelpFormatter
+                                       , allow_abbrev=False )
+    push_parser.set_defaults(command=push)
+    push_parser.add_argument( '-u', '--username'
+                            , type=str
+                            , default=getuser()
+                            , help='Username of current client.' )
+    push_parser.add_argument( '-f', '--input-filepath'
+                            , type=str
+                            , default=tracks_filepath_default
+                            , help='Path to tracks file.' )
+    push_parser.add_argument( '-s', '--value-separator'
+                            , type=str
+                            , default='|'
+                            , help='Value separator used in the tracks file.' )
+    push_parser.add_argument( '-p', '--playlist-name'
+                            , type=str
+                            , default=path.basename(getcwd())
+                            , help='Name of your spotify playlist.' )
+    push_parser.add_argument( '-c', '--create-playlist-if-not-found'
+                            , action='store_true'
+                            , help="If the playlist isn't be found, new one will be created." )
+    push_parser.add_argument( '--port'
+                            , type=int
+                            , default=8080
+                            , choices=[8080, 8888, 123456, 666]
+                            , help='Local port for authentication.' )
+    args = parser.parse_args()
+    global server_port # retarded
+    server_port = args.port
+    args.command(args)
+
 if __name__ == "__main__":
-    main()
+    main(sys.argv)
