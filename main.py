@@ -27,6 +27,7 @@ OAuth_url = 'https://accounts.spotify.com/authorize'
 token_url = 'https://accounts.spotify.com/api/token'
 scope = 'user-read-private'
 state = '0123456789ABCDE'
+maximum_track_count_in_block = 100
 code: str
 access_token: str
 refresh_token: str
@@ -40,6 +41,7 @@ server_port = 8080
 project_name = 'spotify-playlist-manager'
 cache_dir = os.path.expanduser(f"~/.cache/{project_name}")
 tokens_filepath = os.path.join(cache_dir, 'tokens.json')
+value_separator='\t'
 
 
 closer_webpage = \
@@ -76,11 +78,11 @@ class HTTPRequestHandler(BaseHTTPRequestHandler):
 def dump_as_json(str):
     json_obj = json.loads(str)
     json_str = json.dumps(json_obj, indent=4, sort_keys=True)
-    print(highlight(json_str, JsonLexer(), TerminalFormatter()))
+#     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
 def dump_json(json_obj):
     json_str = json.dumps(json_obj, indent=4, sort_keys=True)
-    print(highlight(json_str, JsonLexer(), TerminalFormatter()))
+#     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
 def serve_closer():
     server = HTTPServer((host_name, server_port), HTTPRequestHandler)
@@ -137,8 +139,7 @@ def get_access_token():
         with open(tokens_filepath, 'r') as tokens_file:
             try:
                 tokens = json.load(tokens_file)
-                if tokens is not dict: raise TypeError
-                print(tokens)
+                if tokens is None: raise TypeError
                 if time() - os.path.getmtime(tokens_filepath) > tokens['expires_in']:
                     tokens = get_new_access_token(tokens['refresh_token'])
                     with open(tokens_filepath, 'w') as tokens_file:
@@ -149,6 +150,7 @@ def get_access_token():
             except ( JSONDecodeError \
                    , KeyError        \
                    , TypeError       ):
+                traceback.print_exc()
                 os.remove(tokens_filepath)
                 return get_access_token()
     except FileNotFoundError:
@@ -184,26 +186,38 @@ def main():
             global playlist_id
             playlist_id = playlist['id']
 
-#   GET https://api.spotify.com/v1/playlists/{playlist_id}/tracks
-    response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'    \
-                           , headers={ 'Authorization': f'Bearer {access_token}' }           \
-                           , params={ 'fields' : 'items.track(id,name,artists(id,name),album(id,name))' })
+#   GET https://api.spotify.com/v1/playlists/{playlist_id}
+    response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}' \
+                           , headers={ 'Authorization': f'Bearer {access_token}' } \
+                           , params={ 'fields' : 'tracks.total' }               )
     dump_as_json(response.text)
-    items = response.json()['items']
-    for track in (item['track'] for item in items):
-        for artist in track['artists']:
-            print(artist['id'] ,end=':')
-        print(track['album']['id'], end=':')
-        print(track['id'], end='')
+    track_count = response.json()['tracks']['total']
 
-        print(' - ', end='')
+#   GET https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+    remaining_track_count = track_count
+    print(f"id{value_separator}artists{value_separator}album{value_separator}name")
+    while remaining_track_count > 0:
+        track_count_in_current_block = 0
+        if remaining_track_count > maximum_track_count_in_block:
+            track_count_in_current_block = maximum_track_count_in_block
+        else:
+            track_count_in_current_block = remaining_track_count
 
-        print(track['artists'][0]['name'], end='')
-        for artist in track['artists'][1:]:
-            print(', ' + artist['name'], end='')
-        print(' ', end='')
-        print(f"[{track['album']['name']}]", end=' ')
-        print(track['name'])
+        response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'    \
+                               , headers={ 'Authorization': f'Bearer {access_token}' }           \
+                               , params={ 'fields' : 'items.track(id,name,artists(id,name),album(id,name))' \
+                                        , 'offset' : track_count - remaining_track_count                    \
+                                        , 'limit'  : track_count_in_current_block                           })
+        dump_as_json(response.text)
+        for track in (item['track'] for item in response.json()['items']):
+            print(track['id'], end=value_separator)
+            print(track['artists'][0]['name'], end='')
+            for artist in track['artists'][1:]:
+                print(', ' + artist['name'], end='')
+            print('', end=value_separator)
+            print(track['album']['name'], end=value_separator)
+            print(track['name'])
+        remaining_track_count -= track_count_in_current_block
 
 if __name__ == "__main__":
     main()
