@@ -235,31 +235,65 @@ def push(args):
             if len(track_id) != 22: continue
             track_ids.append(track_id)
 
-    playlist_diff = diff('\n'.join(old_track_ids), '\n'.join(track_ids)).explain().split('\n')
+    playlist_diff = diff('\n'.join(old_track_ids), '\n'.join(track_ids))
+    if not playlist_diff:
+        exit()
+    playlist_diff = playlist_diff.explain().split('\n')
+
+#   DELETE pass
+    tracks = []
     position = 0
     for track_diff in playlist_diff:
+        action = track_diff[0]
         track_id = track_diff[2:]
-        if track_diff.startswith('+'):
-            print(f"ADD: {track_id}")
-#           POST https://api.spotify.com/v1/playlists/{playlist_id}/tracks
-            response = requests.post( f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks" + '?'
-                                    + urlencode({ 'uris'     : f"spotify:track:{track_id}"
-                                                , 'position' : position })
-                                    , headers={ 'Authorization' : f"Bearer {access_token}"
-                                              , 'content-type'  : 'application/json' } )
+        if action == '-':
+            uri = f"spotify:track:{track_id}"
+            try:
+                track_index = [track['uri'] for track in tracks].index(uri)
+                track_positions = tracks[track_index]['positions']
+                track_positions.append(position)
+            except ValueError:
+                tracks.append({ 'uri'       : uri
+                              , 'positions' : [position] })
             position += 1
-        elif track_diff.startswith('-'):
-            print(f"REM: {track_id}")
-#           DELETE https://api.spotify.com/v1/playlists/{playlist_id}/tracks
-            response = requests.delete( f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
-                                      , headers={ 'Authorization' : f"Bearer {access_token}"
-                                                , 'content-type'  : 'application/json' }
-                                      , json={ "tracks": [{ "uri"       : f"spotify:track:{track_id}"
-                                                          , "positions" : [position] }] } )
-            position = position
+        elif action == '+':
+            continue
         else:
-            print(f"SKP: {track_id}")
             position += 1
+            continue
+    if tracks:
+#       DELETE https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+        response = requests.delete( f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+                                  , headers={ 'Authorization' : f"Bearer {access_token}"
+                                            , 'content-type'  : 'application/json' }
+                                  , json={ 'tracks': tracks } )
+
+#   ADD pass
+    track_position = 0
+    track_diff_index = 0
+    while track_diff_index < len(playlist_diff):
+        operation = playlist_diff[track_diff_index][0]
+        if operation == '+':
+            old_track_diff_index = track_diff_index
+            uris = []
+            while playlist_diff[track_diff_index][0] == '+':
+                track_id = playlist_diff[track_diff_index][2:]
+                uri = f"spotify:track:{track_id}"
+                uris.append(uri)
+                track_diff_index += 1
+            tracks_to_add = track_diff_index - old_track_diff_index
+#           POST https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+            response = requests.post( f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+                                    , headers={ 'Authorization' : f"Bearer {access_token}"
+                                              , 'content-type'  : 'application/json' }
+                                    , json={ 'uris'     : uris
+                                           , 'position' : track_position } )
+            track_position += tracks_to_add
+        elif operation == '-':
+            track_diff_index += 1
+        else:
+            track_position += 1
+            track_diff_index += 1
 
 def pull(args):
     playlist_name = args.playlist_name
