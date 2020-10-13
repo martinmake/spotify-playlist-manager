@@ -9,6 +9,8 @@ from base64 import  urlsafe_b64encode
 import secrets
 from hashlib import sha256
 
+from diff import diff
+
 from threading import Thread
 import os
 from os import path, getcwd
@@ -30,7 +32,7 @@ epilog='''<https://www.github.com/martinmake/spotify-playlist-manager>'''
 client_id = 'ccf29f57a6f049a08d83403ff98ce91b';
 redirect_uri = 'http://localhost:8080';
 
-scope = 'user-read-private'
+scope = 'playlist-modify-public playlist-modify-private'
 state = '0123456789ABCDE'
 maximum_track_count_in_block = 100
 code: str
@@ -171,8 +173,93 @@ def get_access_token():
 
 def push(args):
     playlist_name = args.playlist_name
-    global server_port # retarded
-    server_port = args.port
+
+    access_token = get_access_token()
+
+    if not 'playlist_id' in args:
+#       GET https://api.spotify.com/v1/me
+        response = requests.get( 'https://api.spotify.com/v1/me'
+                               , headers={ 'Authorization': f"Bearer {access_token}" } )
+        user_id = response.json()['id']
+
+#       GET https://api.spotify.com/v1/users/{user_id}/playlists
+        response = requests.get( f"https://api.spotify.com/v1/users/{user_id}/playlists"
+                               , headers={ 'Authorization': f"Bearer {access_token}" } )
+        playlists = response.json()['items']
+        playlist_id = None
+        for playlist in playlists:
+            if playlist['name'] == playlist_name:
+                playlist_id = playlist['id']
+        if not playlist_id:
+            if args.create_playlist_if_not_found:
+                response = requests.post( f"https://api.spotify.com/v1/users/{user_id}/playlists"
+                                        , headers={ 'Authorization': f"Bearer {access_token}"
+                                                  , 'content-type' : 'application/json' }
+                                        , json={'name' : playlist_name} )
+                playlist_id = response.json()['id']
+            else:
+                print(f"ERROR: Playlist '{playlist_name}' not found!")
+                exit(2)
+
+
+#   GET https://api.spotify.com/v1/playlists/{playlist_id}
+    response = requests.get( f"https://api.spotify.com/v1/playlists/{playlist_id}"
+                           , headers={ 'Authorization': f"Bearer {access_token}" }
+                           , params={ 'fields' : 'tracks.total' } )
+    track_count = response.json()['tracks']['total']
+
+    old_track_ids = []
+    remaining_track_count = track_count
+    while remaining_track_count > 0:
+        track_count_in_current_block = 0
+        if remaining_track_count > maximum_track_count_in_block:
+            track_count_in_current_block = maximum_track_count_in_block
+        else:
+            track_count_in_current_block = remaining_track_count
+#       GET https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+        response = requests.get( f'https://api.spotify.com/v1/playlists/{playlist_id}/tracks'
+                               , headers={ 'Authorization': f"Bearer {access_token}" }
+                               , params={ 'fields' : 'items.track(id)'
+                                        , 'offset' : track_count - remaining_track_count
+                                        , 'limit'  : track_count_in_current_block } )
+        for track in (item['track'] for item in response.json()['items']):
+            old_track_ids.append(track['id'])
+        remaining_track_count -= track_count_in_current_block
+
+    track_ids = []
+    tracks_filepath = args.tracks_filepath
+    value_separator = args.value_separator
+    with open(tracks_filepath, 'r') as tracks_file:
+        for track_line in tracks_file.readlines():
+            track_id = track_line.split(value_separator)[0].strip()
+            if len(track_id) != 22: continue
+            track_ids.append(track_id)
+
+    playlist_diff = diff('\n'.join(old_track_ids), '\n'.join(track_ids)).explain().split('\n')
+    position = 0
+    for track_diff in playlist_diff:
+        track_id = track_diff[2:]
+        if track_diff.startswith('+'):
+            print(f"ADD: {track_id}")
+#           POST https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+            response = requests.post( f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks" + '?'
+                                    + urlencode({ 'uris'     : f"spotify:track:{track_id}"
+                                                , 'position' : position })
+                                    , headers={ 'Authorization' : f"Bearer {access_token}"
+                                              , 'content-type'  : 'application/json' } )
+            position += 1
+        elif track_diff.startswith('-'):
+            print(f"REM: {track_id}")
+#           DELETE https://api.spotify.com/v1/playlists/{playlist_id}/tracks
+            response = requests.delete( f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks"
+                                      , headers={ 'Authorization' : f"Bearer {access_token}"
+                                                , 'content-type'  : 'application/json' }
+                                      , json={ "tracks": [{ "uri"       : f"spotify:track:{track_id}"
+                                                          , "positions" : [position] }] } )
+            position = position
+        else:
+            print(f"SKP: {track_id}")
+            position += 1
 
 def pull(args):
     playlist_name = args.playlist_name
@@ -242,7 +329,7 @@ def main(argv):
                                       , help='Idkkkkk.' )
 
     pull_parser = subparsers.add_parser( 'pull'
-                                       , help='Pull spotify playlist from the cloud into a file.'
+                                       , help       ='Pull spotify playlist from the cloud into a file.'
                                        , description='Pull spotify playlist from the cloud into a file.'
                                        , epilog=epilog
                                        , formatter_class=ArgumentDefaultsHelpFormatter
@@ -264,7 +351,7 @@ def main(argv):
                             , help='local port for authentication' )
 
     push_parser = subparsers.add_parser( 'push'
-                                       , help='Push spotify playlist from a file into the cloud.'
+                                       , help       ='Push spotify playlist from a file into the cloud.'
                                        , description='Push spotify playlist from a file into the cloud.'
                                        , epilog=epilog
                                        , formatter_class=ArgumentDefaultsHelpFormatter
@@ -274,7 +361,7 @@ def main(argv):
                             , type=str
                             , default=getuser()
                             , help='Username of current client.' )
-    push_parser.add_argument( '-f', '--input-filepath'
+    push_parser.add_argument( '-f', '--tracks-filepath'
                             , type=str
                             , default=tracks_filepath_default
                             , help='Path to tracks file.' )
