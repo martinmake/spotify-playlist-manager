@@ -35,8 +35,12 @@ client_id = 'ccf29f57a6f049a08d83403ff98ce91b'
 scope = 'playlist-modify-public playlist-modify-private'
 state = '0123456789ABCDE' # has to be randomly generated
 maximum_track_count_in_block = 100
-code: str
 
+tokens_filename = 'tokens.json'
+
+code: str
+cache_dir: str
+tokens_filepath: str
 server_port: int
 redirect_uri: str
 
@@ -44,7 +48,6 @@ tracks_filepath_default='./tracks.tsv'
 value_separator_default='\t'
 value_separator=value_separator_default
 project_name = 'spotify-playlist-manager'
-tokens_filepath = os.path.join(cache_dir, 'tokens.json')
 
 
 closer_webpage = \
@@ -88,7 +91,7 @@ def dump_json(json_obj):
     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
 def serve_closer():
-    server = HTTPServer((hostname, server_port), HTTPRequestHandler)
+    server = HTTPServer(('localhost', server_port), HTTPRequestHandler)
 
     try:
         server.handle_request()
@@ -419,9 +422,11 @@ def main(argv):
     global server_port
     server_port = args.port
     global redirect_uri
-    redirect_uri = f"http://127.0.0.1:{server_port}"
+    redirect_uri = f"http://localhost:{server_port}"
     global cache_dir
-    cache_dir = os.path.expanduser(f"~/.cache/{project_name}/{username}/")
+    cache_dir = os.path.expanduser(f"~/.cache/{project_name}/{args.username}/")
+    global tokens_filepath
+    tokens_filepath = os.path.join(cache_dir, tokens_filename)
 
     args.command(args)
 
