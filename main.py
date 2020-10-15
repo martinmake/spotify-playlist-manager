@@ -27,24 +27,23 @@ from pygments import highlight
 from pygments.lexers import JsonLexer
 from pygments.formatters import TerminalFormatter
 
-epilog='''<https://www.github.com/martinmake/spotify-playlist-manager>'''
+epilog = \
+'''<https://www.github.com/martinmake/spotify-playlist-manager>'''
 
-client_id = 'ccf29f57a6f049a08d83403ff98ce91b';
-redirect_uri = 'http://localhost:8080';
+client_id = 'ccf29f57a6f049a08d83403ff98ce91b'
 
 scope = 'playlist-modify-public playlist-modify-private'
-state = '0123456789ABCDE'
+state = '0123456789ABCDE' # has to be randomly generated
 maximum_track_count_in_block = 100
 code: str
 
-host_name = 'localhost'
-server_port = 8080
+server_port: int
+redirect_uri: str
 
 tracks_filepath_default='./tracks.tsv'
 value_separator_default='\t'
 value_separator=value_separator_default
 project_name = 'spotify-playlist-manager'
-cache_dir = os.path.expanduser(f"~/.cache/{project_name}")
 tokens_filepath = os.path.join(cache_dir, 'tokens.json')
 
 
@@ -89,7 +88,7 @@ def dump_json(json_obj):
     print(highlight(json_str, JsonLexer(), TerminalFormatter()))
 
 def serve_closer():
-    server = HTTPServer((host_name, server_port), HTTPRequestHandler)
+    server = HTTPServer((hostname, server_port), HTTPRequestHandler)
 
     try:
         server.handle_request()
@@ -351,8 +350,7 @@ def pull(args):
 
 def main(argv):
     parser = ArgumentParser( prog=argv[0]
-                           , description='''      Push/pull spotify playlist
-                                            from text file to cloud and vice versa.'''
+                           , description='Push/pull spotify playlist from text file to cloud and vice versa.'
                            , epilog=epilog
                            , formatter_class=ArgumentDefaultsHelpFormatter
                            , allow_abbrev=False )
@@ -416,8 +414,15 @@ def main(argv):
                             , choices=[8080, 8888, 123456, 666]
                             , help='Local port for authentication.' )
     args = parser.parse_args()
-    global server_port # retarded
+
+#   retarded
+    global server_port
     server_port = args.port
+    global redirect_uri
+    redirect_uri = f"http://127.0.0.1:{server_port}"
+    global cache_dir
+    cache_dir = os.path.expanduser(f"~/.cache/{project_name}/{username}/")
+
     args.command(args)
 
 if __name__ == "__main__":
